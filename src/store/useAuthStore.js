@@ -1,6 +1,6 @@
 import { create } from 'zustand';
-import { account, ID } from '../lib/appwrite';
-import { clearCachedToken } from '../lib/api';
+import { account } from '../lib/appwrite';
+import { apiFetch } from '../lib/api';
 
 export const formatAuthError = (err, context = 'general') => {
   if (!err) return 'An unexpected error occurred. Please try again.';
@@ -100,10 +100,12 @@ export const formatAuthError = (err, context = 'general') => {
 const formatUser = (acc) => {
   if (!acc) return null;
   return {
-    id: acc.$id,
-    $id: acc.$id,
+    id: acc.id || acc.$id,
+    $id: acc.$id || acc.id,
     name: acc.name || 'Captain',
     email: acc.email,
+    role: acc.role,
+    emailVerification: acc.emailVerification,
   };
 };
 
@@ -115,40 +117,11 @@ export const useAuthStore = create((set) => ({
   login: async (email, password) => {
     try {
       set({ loading: true, error: null });
-
-      // Clean up any stale active sessions
-      try {
-        await account.deleteSession('current');
-      } catch (_) {
-        // No active session
-      }
-
-      try {
-        await account.createEmailPasswordSession(email, password);
-      } catch (sessionErr) {
-        if (
-          sessionErr?.type === 'user_session_already_exists' ||
-          sessionErr?.code === 409 ||
-          sessionErr?.message?.toLowerCase().includes('session is active')
-        ) {
-          // A session is already active; clear and retry
-          try {
-            await account.deleteSession('current');
-            await account.createEmailPasswordSession(email, password);
-          } catch (_) {
-            const existingAcc = await account.get().catch(() => null);
-            if (!existingAcc || (existingAcc.email && existingAcc.email.toLowerCase() !== email.toLowerCase())) {
-              throw sessionErr;
-            }
-          }
-        } else {
-          throw sessionErr;
-        }
-      }
-
-      const acc = await account.get();
-      const user = formatUser(acc);
-      clearCachedToken();
+      const data = await apiFetch('/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ email, password }),
+      });
+      const user = formatUser(data.user);
       set({ user, loading: false, error: null });
       return user;
     } catch (err) {
@@ -161,22 +134,11 @@ export const useAuthStore = create((set) => ({
   signup: async (name, email, password) => {
     try {
       set({ loading: true, error: null });
-
-      // 1. Create account in Appwrite
-      await account.create(ID.unique(), email, password, name);
-
-      // 2. Clear any lingering session & start fresh session
-      try {
-        await account.deleteSession('current');
-      } catch (_) {
-        // No active session
-      }
-      await account.createEmailPasswordSession(email, password);
-
-      // 3. Fetch current user
-      const acc = await account.get();
-      const user = formatUser(acc);
-      clearCachedToken();
+      const data = await apiFetch('/auth/signup', {
+        method: 'POST',
+        body: JSON.stringify({ name, email, password }),
+      });
+      const user = formatUser(data.user);
       set({ user, loading: false, error: null });
       return user;
     } catch (err) {
@@ -188,11 +150,10 @@ export const useAuthStore = create((set) => ({
 
   logout: async () => {
     try {
-      await account.deleteSession('current');
+      await apiFetch('/auth/logout', { method: 'POST' });
     } catch (err) {
       console.error('Logout error:', err);
     } finally {
-      clearCachedToken();
       set({ user: null, loading: false, error: null });
     }
   },
@@ -200,12 +161,11 @@ export const useAuthStore = create((set) => ({
   fetchMe: async () => {
     try {
       set({ loading: true, error: null });
-      const acc = await account.get();
-      const user = formatUser(acc);
+      const data = await apiFetch('/auth/me');
+      const user = formatUser(data.user);
       set({ user, loading: false, error: null });
       return user;
     } catch (_err) {
-      clearCachedToken();
       set({ user: null, loading: false, error: null });
       return null;
     }
@@ -259,10 +219,5 @@ export const useAuthStore = create((set) => ({
 
 // Listen for 401s to force logout only when Appwrite session is actually invalid
 window.addEventListener('auth:unauthorized', async () => {
-  clearCachedToken();
-  try {
-    await account.get();
-  } catch (_err) {
-    useAuthStore.setState({ user: null });
-  }
+  useAuthStore.setState({ user: null });
 });
